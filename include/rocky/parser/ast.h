@@ -10,7 +10,12 @@ typedef enum {
     TYPE_INT,
     TYPE_FLOAT,
     TYPE_BOOL,
+    TYPE_STRING,
+    TYPE_SIZE_T,
     TYPE_VOID,
+    TYPE_POINTER,
+    TYPE_FUNCTION,
+    TYPE_ERROR
 } TypeKind;
 
 /* ── Operators ────────────────────────────────────────────── */

@@ -1,14 +1,19 @@
 #include <rocky/parser/ast.h>
 #include <rocky/parser/nodes.h>
 #include <rocky/parser/sema/sema.h>
+#include <rocky/parser/sema/type.h>
 #include <rocky/parser/sema/symtable.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 static void visit_stmt(Sema* sema, Stmt* stmt);
+static SemaType* check_expr(Sema* sema, Expr* expr);
 static void visit_expr(Sema* sema, Expr* expr);
 static void visit_declaration(Sema* sema, Stmt* stmt);
+static SemaType* check_unary_expr(Sema* sema, Expr* expr);
+static SemaType* check_binary_expr(Sema* sema, Expr* expr);
+static SemaTypeKind sema_type_from_ast_kind(TypeKind kind);
 
 void init_sema(Sema* sema) {
     init_sym_table(&sema->table);
@@ -18,6 +23,71 @@ void init_sema(Sema* sema) {
 void free_sema(Sema* sema) {
     free_sym_table(&sema->table);
 }
+
+// convert semantic types to AST type kinds
+static TypeKind ast_type_from_sema_type(const SemaType* type) {
+    if (type == NULL)
+        return TYPE_ERROR;
+
+    switch (type->kind) {
+    case SEMA_TYPE_INT:
+        return TYPE_INT;
+
+    case SEMA_TYPE_FLOAT:
+        return TYPE_FLOAT;
+
+    case SEMA_TYPE_BOOL:
+        return TYPE_BOOL;
+
+    case SEMA_TYPE_STRING:
+        return TYPE_STRING;
+
+    case SEMA_TYPE_SIZE_T:
+        return TYPE_SIZE_T;
+
+    case SEMA_TYPE_VOID:
+        return TYPE_VOID;
+
+    case SEMA_TYPE_POINTER:
+        return TYPE_POINTER;
+
+    case SEMA_TYPE_FUNCTION:
+        return TYPE_FUNCTION;
+
+    case SEMA_TYPE_ERROR:
+    default:
+        return TYPE_ERROR;
+    }
+}
+
+static SemaType* error_type(void) {
+    return sema_type_new(SEMA_TYPE_ERROR);
+}
+
+static void report_expression_error(
+    Sema* sema,
+    const Expr* expr,
+    const char* message
+) {
+    fprintf(
+        stderr,
+        "type error at line %d col %d: %s\n",
+        expr->token.line,
+        expr->token.column,
+        message
+    );
+
+    sema->errors++;
+}
+
+static bool is_boolean_type(const SemaType* type) {
+    return type != NULL && type->kind == SEMA_TYPE_BOOL;
+}
+
+static bool is_integer_type(const SemaType* type) {
+    return sema_type_is_integer(type);
+}
+
 
 static void visit_stmt_list(Sema* sema, Stmt* stmt) {
     while (stmt != NULL) {
@@ -120,47 +190,160 @@ static void visit_stmt(Sema* sema, Stmt* stmt) {
     }
 }
 
-static void visit_expr(Sema* sema, Expr* expr) {
+static SemaType* check_expr(Sema* sema, Expr* expr) {
     if (expr == NULL)
-        return;
+        return sema_type_new(SEMA_TYPE_VOID);
+
+    SemaType* result = NULL;
 
     switch (expr->kind) {
     case EXPR_INT_LIT:
+        result = sema_type_new(SEMA_TYPE_INT);
         break;
 
     case EXPR_FLOAT_LIT:
+        result = sema_type_new(SEMA_TYPE_FLOAT);
         break;
 
     case EXPR_BOOL_LIT:
+        result = sema_type_new(SEMA_TYPE_BOOL);
         break;
 
     case EXPR_STRING_LIT:
+        result = sema_type_new(SEMA_TYPE_STRING);
         break;
 
     case EXPR_IDENT: {
-        Symbol* entry = resolve_symbol(&sema->table, expr->as.ident.name, expr->as.ident.len);
+        Symbol* entry = resolve_symbol(
+            &sema->table,
+            expr->as.ident.name,
+            expr->as.ident.len
+        );
+
         if (entry == NULL) {
-            fprintf(stderr, "error: variable '%.*s' use before declaration\n", expr->as.ident.len,
-                    expr->as.ident.name);
+            fprintf(
+                stderr,
+                "type error at line %d col %d: "
+                "variable '%.*s' is not declared\n",
+                expr->token.line,
+                expr->token.column,
+                expr->as.ident.len,
+                expr->as.ident.name
+            );
+
             sema->errors++;
+            result = error_type();
+            break;
         }
+
+        result = sema_type_from_ast(entry->type);
+
+        if (result == NULL)
+            result = error_type();
+
         break;
     }
 
-    case EXPR_UNARY: // recursing into op
-        visit_expr(sema, expr->as.unary.operand);
+    case EXPR_UNARY:
+        result = check_unary_expr(sema, expr);
         break;
 
-    case EXPR_BINARY: // recursing into op
-        visit_expr(sema, expr->as.binary.lhs);
-        visit_expr(sema, expr->as.binary.rhs);
+    case EXPR_BINARY:
+        result = check_binary_expr(sema, expr);
         break;
 
-    case EXPR_CAST: // recursing into to
-        visit_expr(sema, expr->as.cast.operand);
+    case EXPR_CAST: {
+        SemaType* operand = check_expr(
+            sema,
+            expr->as.cast.operand
+        );
+
+        if (operand == NULL)
+            return error_type();
+
+        SemaType* target = sema_type_new(
+            sema_type_from_ast_kind(expr->as.cast.to)
+        );
+
+        if (target == NULL) {
+            sema_type_free(operand);
+            return error_type();
+        }
+
+        /*
+         * Explicit casts are currently accepted between numeric types
+         * and between identical types.
+         */
+        bool valid_cast =
+            sema_type_equal(operand, target) ||
+            (sema_type_is_numeric(operand) &&
+             sema_type_is_numeric(target));
+
+        if (!valid_cast) {
+            report_expression_error(
+                sema,
+                expr,
+                "invalid cast between incompatible types"
+            );
+
+            sema_type_free(target);
+            target = error_type();
+        }
+
+        sema_type_free(operand);
+        result = target;
         break;
+    }
+
+    default:
+        result = error_type();
+        break;
+    }
+
+    if (result != NULL)
+        expr->type = ast_type_from_sema_type(result);
+
+    return result;
+}
+
+static void visit_expr(Sema* sema, Expr* expr) {
+    SemaType* type = check_expr(sema, expr);
+    sema_type_free(type);
+}
+
+
+static SemaTypeKind sema_type_from_ast_kind(TypeKind kind) {
+    switch (kind) {
+    case TYPE_INT:
+        return SEMA_TYPE_INT;
+
+    case TYPE_FLOAT:
+        return SEMA_TYPE_FLOAT;
+
+    case TYPE_BOOL:
+        return SEMA_TYPE_BOOL;
+
+    case TYPE_STRING:
+        return SEMA_TYPE_STRING;
+
+    case TYPE_SIZE_T:
+        return SEMA_TYPE_SIZE_T;
+
+    case TYPE_VOID:
+        return SEMA_TYPE_VOID;
+
+    case TYPE_POINTER:
+        return SEMA_TYPE_POINTER;
+
+    case TYPE_FUNCTION:
+        return SEMA_TYPE_FUNCTION;
+
+    case TYPE_ERROR:
+    default:
+        return SEMA_TYPE_ERROR;
     }
 }
+
 
 // insert new entry into symbol table
 static void visit_declaration(Sema* sema, Stmt* stmt) {
@@ -173,6 +356,212 @@ static void visit_declaration(Sema* sema, Stmt* stmt) {
     if (!declare_symbol(&sema->table, name.start, name.length, stmt->defi.declaration_stmt.type)) {
         sema->errors++;
     }
+}
+
+
+// unary operator checking
+static SemaType* check_unary_expr(Sema* sema, Expr* expr) {
+    SemaType* operand = check_expr(
+        sema,
+        expr->as.unary.operand
+    );
+
+    if (operand == NULL)
+        return error_type();
+
+    SemaType* result = NULL;
+
+    switch (expr->as.unary.op) {
+    case UNOP_NEG:
+        if (!sema_type_is_numeric(operand)) {
+            report_expression_error(
+                sema,
+                expr,
+                "unary '-' requires a numeric operand"
+            );
+
+            result = error_type();
+        } else {
+            result = sema_type_clone(operand);
+        }
+        break;
+
+    case UNOP_BITNOT:
+        if (!is_integer_type(operand)) {
+            report_expression_error(
+                sema,
+                expr,
+                "unary '~' requires an integer operand"
+            );
+
+            result = error_type();
+        } else {
+            result = sema_type_clone(operand);
+        }
+        break;
+
+    case UNOP_LOGICNOT:
+        if (!is_boolean_type(operand)) {
+            report_expression_error(
+                sema,
+                expr,
+                "unary '!' requires a bool operand"
+            );
+
+            result = error_type();
+        } else {
+            result = sema_type_new(SEMA_TYPE_BOOL);
+        }
+        break;
+
+    default:
+        result = error_type();
+        break;
+    }
+
+    sema_type_free(operand);
+
+    if (result != NULL)
+        expr->type = ast_type_from_sema_type(result);
+
+    return result;
+}
+
+
+// binary operator checking
+static SemaType* check_binary_expr(Sema* sema, Expr* expr) {
+    SemaType* left = check_expr(
+        sema,
+        expr->as.binary.lhs
+    );
+
+    SemaType* right = check_expr(
+        sema,
+        expr->as.binary.rhs
+    );
+
+    if (left == NULL || right == NULL) {
+        sema_type_free(left);
+        sema_type_free(right);
+        return error_type();
+    }
+
+    BinaryOp op = expr->as.binary.op;
+    SemaType* result = NULL;
+
+    switch (op) {
+    case BINOP_ADD:
+    case BINOP_SUB:
+    case BINOP_MUL:
+    case BINOP_DIV:
+        if (!sema_type_is_numeric(left) ||
+            !sema_type_is_numeric(right)) {
+            report_expression_error(
+                sema,
+                expr,
+                "arithmetic operators require numeric operands"
+            );
+
+            result = error_type();
+        } else {
+            SemaTypeKind common_kind =
+                sema_type_common_numeric(left, right);
+
+            result = sema_type_new(common_kind);
+        }
+        break;
+
+    case BINOP_MOD:
+        if (!is_integer_type(left) ||
+            !is_integer_type(right)) {
+            report_expression_error(
+                sema,
+                expr,
+                "operator '%' requires integer operands"
+            );
+
+            result = error_type();
+        } else {
+            result = sema_type_new(SEMA_TYPE_INT);
+        }
+        break;
+
+    case BINOP_BAND:
+    case BINOP_BOR:
+    case BINOP_BXOR:
+    case BINOP_SHL:
+    case BINOP_SHR:
+        if (!is_integer_type(left) ||
+            !is_integer_type(right)) {
+            report_expression_error(
+                sema,
+                expr,
+                "bitwise operators require integer operands"
+            );
+
+            result = error_type();
+        } else {
+            result = sema_type_new(SEMA_TYPE_INT);
+        }
+        break;
+
+    case BINOP_EQ:
+    case BINOP_NEQ:
+        if (!sema_type_equal(left, right) &&
+            !sema_type_can_convert(left, right) &&
+            !sema_type_can_convert(right, left)) {
+            report_expression_error(
+                sema,
+                expr,
+                "equality operands must have compatible types"
+            );
+        }
+
+        result = sema_type_new(SEMA_TYPE_BOOL);
+        break;
+
+    case BINOP_LT:
+    case BINOP_GT:
+    case BINOP_LE:
+    case BINOP_GE:
+        if (!sema_type_is_numeric(left) ||
+            !sema_type_is_numeric(right)) {
+            report_expression_error(
+                sema,
+                expr,
+                "ordered comparisons require numeric operands"
+            );
+        }
+
+        result = sema_type_new(SEMA_TYPE_BOOL);
+        break;
+
+    case BINOP_AND:
+    case BINOP_OR:
+        if (!is_boolean_type(left) ||
+            !is_boolean_type(right)) {
+            report_expression_error(
+                sema,
+                expr,
+                "logical operators require bool operands"
+            );
+        }
+
+        result = sema_type_new(SEMA_TYPE_BOOL);
+        break;
+
+    default:
+        result = error_type();
+        break;
+    }
+
+    sema_type_free(left);
+    sema_type_free(right);
+
+    if (result != NULL)
+        expr->type = ast_type_from_sema_type(result);
+
+    return result;
 }
 
 bool sema_check(Sema* sema, Stmt* program) {

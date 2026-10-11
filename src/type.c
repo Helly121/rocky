@@ -1,4 +1,5 @@
 #include <rocky/parser/sema/type.h>
+#include <rocky/parser/nodes.h>
 #include <stdlib.h>
 
 SemaType* sema_type_new(SemaTypeKind kind) {
@@ -98,6 +99,9 @@ SemaType* sema_type_function(
     if (return_type == NULL)
         return NULL;
 
+    if (parameter_count > 0 && parameters == NULL)
+        return NULL;
+
     SemaType* type = sema_type_new(SEMA_TYPE_FUNCTION);
 
     if (type == NULL)
@@ -160,6 +164,132 @@ void sema_type_free(SemaType* type) {
 
     free(type);
 }
+
+
+
+static SemaType* sema_type_from_primitive(TokenKind primitive) {
+    switch (primitive) {
+    case TOKEN_TYPE_INT:
+        return sema_type_new(SEMA_TYPE_INT);
+
+    case TOKEN_TYPE_FLOAT:
+        return sema_type_new(SEMA_TYPE_FLOAT);
+
+    case TOKEN_TYPE_BOOL:
+        return sema_type_new(SEMA_TYPE_BOOL);
+
+    case TOKEN_TYPE_STRING:
+        return sema_type_new(SEMA_TYPE_STRING);
+
+    case TOKEN_TYPE_SIZE_T:
+        return sema_type_new(SEMA_TYPE_SIZE_T);
+
+    default:
+        return sema_type_new(SEMA_TYPE_ERROR);
+    }
+}
+
+static size_t count_parameters(const Param* parameters) {
+    size_t count = 0;
+
+    while (parameters != NULL) {
+        count++;
+        parameters = parameters->next;
+    }
+
+    return count;
+}
+
+
+SemaType* sema_type_from_ast(const TypeExpr* type) {
+    if (type == NULL)
+        return NULL;
+
+    switch (type->kind) {
+    case TYPE_PRIMITIVE:
+        return sema_type_from_primitive(
+            type->defi.primitive.primitive
+        );
+
+    case TYPE_POINTER: {
+        SemaType* base = sema_type_from_ast(
+            type->defi.pointer.base
+        );
+
+        if (base == NULL)
+            return NULL;
+
+        SemaType* pointer = sema_type_pointer(base);
+        sema_type_free(base);
+
+        return pointer;
+    }
+
+    case TYPE_FUNC_POINTER: {
+        size_t parameter_count = count_parameters(
+            type->defi.func_pointer.params
+        );
+
+        SemaType** parameters = NULL;
+
+        if (parameter_count > 0) {
+            parameters = calloc(
+                parameter_count,
+                sizeof(SemaType*)
+            );
+
+            if (parameters == NULL)
+                return NULL;
+        }
+
+        const Param* parameter = type->defi.func_pointer.params;
+
+        for (size_t i = 0; i < parameter_count; i++) {
+            parameters[i] = sema_type_from_ast(parameter->type);
+
+            if (parameters[i] == NULL) {
+                for (size_t j = 0; j < i; j++)
+                    sema_type_free(parameters[j]);
+
+                free(parameters);
+                return NULL;
+            }
+
+            parameter = parameter->next;
+        }
+
+        SemaType* return_type = sema_type_from_ast(
+            type->defi.func_pointer.return_type
+        );
+
+        if (return_type == NULL) {
+            for (size_t i = 0; i < parameter_count; i++)
+                sema_type_free(parameters[i]);
+
+            free(parameters);
+            return NULL;
+        }
+
+        SemaType* function = sema_type_function(
+            (const SemaType* const*)parameters,
+            parameter_count,
+            return_type
+        );
+
+        for (size_t i = 0; i < parameter_count; i++)
+            sema_type_free(parameters[i]);
+
+        free(parameters);
+        sema_type_free(return_type);
+
+        return function;
+    }
+
+    default:
+        return sema_type_new(SEMA_TYPE_ERROR);
+    }
+}
+
 
 bool sema_type_equal(const SemaType* left, const SemaType* right) {
     if (left == NULL || right == NULL)
@@ -249,21 +379,36 @@ bool sema_type_assignable(
     const SemaType* target,
     const SemaType* value
 ) {
-    if (target == NULL || value == NULL)
-        return false;
+    return sema_type_can_convert(value, target);
+}
 
-    if (sema_type_equal(target, value))
-        return true;
+SemaConversion sema_type_conversion(
+    const SemaType* source,
+    const SemaType* target
+) {
+    if (source == NULL || target == NULL)
+        return SEMA_CONVERSION_NONE;
 
-    // The only implicit conversion currently supported is int -> float
-    
-    if (target->kind == SEMA_TYPE_FLOAT &&
-        value->kind == SEMA_TYPE_INT) {
-        return true;
+    if (sema_type_equal(source, target))
+        return SEMA_CONVERSION_IDENTITY;
+
+    // implicit widening conversion int -> float
+    if (source->kind == SEMA_TYPE_INT &&
+        target->kind == SEMA_TYPE_FLOAT) {
+        return SEMA_CONVERSION_INT_TO_FLOAT;
     }
 
-    return false;
+    return SEMA_CONVERSION_NONE;
 }
+
+bool sema_type_can_convert(
+    const SemaType* source,
+    const SemaType* target
+) {
+    return sema_type_conversion(source, target) !=
+           SEMA_CONVERSION_NONE;
+}
+
 
 const char* sema_type_name(const SemaType* type) {
     if (type == NULL)

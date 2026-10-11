@@ -16,7 +16,15 @@ typedef enum {
     SEMA_TYPE_FUNCTION
 } SemaTypeKind;
 
+// Conversion classification
+typedef enum {
+    SEMA_CONVERSION_NONE,
+    SEMA_CONVERSION_IDENTITY,
+    SEMA_CONVERSION_INT_TO_FLOAT
+} SemaConversion;
+
 typedef struct SemaType SemaType;
+typedef struct TypeExpr TypeExpr;
 
 typedef struct {
     SemaType** parameters;
@@ -37,7 +45,6 @@ struct SemaType {
 };
 
 //Constructors - returned will be released with sema_type_free().
-
 SemaType* sema_type_new(SemaTypeKind kind);
 SemaType* sema_type_pointer(const SemaType* base);
 SemaType* sema_type_function(
@@ -63,6 +70,21 @@ bool sema_type_is_integer(const SemaType* type);
 SemaTypeKind sema_type_common_numeric(
     const SemaType* left,
     const SemaType* right
+);
+
+// Convert a parser type expression into a semantic type
+SemaType* sema_type_from_ast(const struct TypeExpr* type);
+
+// Returns the conversion required to convert src into target
+SemaConversion sema_type_conversion(
+    const SemaType* source,
+    const SemaType* target
+);
+
+// Returns true when source can be implicitly converted to target
+bool sema_type_can_convert(
+    const SemaType* source,
+    const SemaType* target
 );
 
 // Useful for diagnostics.

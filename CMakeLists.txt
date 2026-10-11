@@ -40,8 +40,6 @@ add_executable(rocky
   src/symtable.c
   src/sema.c
   src/adt/linked_list.c
-  src/symtable.c
-  src/sema.c
   src/type.c
   ${ARGPARSE_SOURCES}
 )

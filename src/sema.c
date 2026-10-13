@@ -80,6 +80,24 @@ static void report_expression_error(
     sema->errors++;
 }
 
+
+static void report_statement_error(
+    Sema* sema,
+    const Stmt* stmt,
+    const char* message
+) {
+    fprintf(
+        stderr,
+        "type error at line %d col %d: %s\n",
+        stmt->token.line,
+        stmt->token.column,
+        message
+    );
+
+    sema->errors++;
+}
+
+
 static bool is_boolean_type(const SemaType* type) {
     return type != NULL && type->kind == SEMA_TYPE_BOOL;
 }
@@ -270,10 +288,7 @@ static SemaType* check_expr(Sema* sema, Expr* expr) {
             return error_type();
         }
 
-        /*
-         * Explicit casts are currently accepted between numeric types
-         * and between identical types.
-         */
+        // Explicit casts are accepted between numeric types and between identical types
         bool valid_cast =
             sema_type_equal(operand, target) ||
             (sema_type_is_numeric(operand) &&
@@ -347,13 +362,67 @@ static SemaTypeKind sema_type_from_ast_kind(TypeKind kind) {
 
 // insert new entry into symbol table
 static void visit_declaration(Sema* sema, Stmt* stmt) {
-
     Token name = stmt->defi.declaration_stmt.name;
 
-    visit_expr(sema, stmt->defi.declaration_stmt.expr);
+    // Convert the declared parser type into a semantic type
+    SemaType* declared_type = sema_type_from_ast(
+        stmt->defi.declaration_stmt.type
+    );
 
-    // declaration handling
-    if (!declare_symbol(&sema->table, name.start, name.length, stmt->defi.declaration_stmt.type)) {
+    if (declared_type == NULL ||
+        declared_type->kind == SEMA_TYPE_ERROR) {
+        report_statement_error(
+            sema,
+            stmt,
+            "invalid declaration type"
+        );
+
+        sema_type_free(declared_type);
+        return;
+    }
+
+    // Infer and validate the initializer expression type.
+    SemaType* value_type = check_expr(
+        sema,
+        stmt->defi.declaration_stmt.expr
+    );
+
+    if (value_type == NULL) {
+        report_statement_error(
+            sema,
+            stmt,
+            "unable to determine initializer type"
+        );
+    } else if (value_type->kind != SEMA_TYPE_ERROR &&
+               !sema_type_assignable(declared_type, value_type)) {
+        fprintf(
+            stderr,
+            "type error at line %d col %d: "
+            "cannot initialize variable '%.*s' of type %s "
+            "with a value of type %s\n",
+            stmt->token.line,
+            stmt->token.column,
+            name.length,
+            name.start,
+            sema_type_name(declared_type),
+            sema_type_name(value_type)
+        );
+
+        sema->errors++;
+    }
+    
+    // Free temp sematic types after validation
+    sema_type_free(value_type);
+    sema_type_free(declared_type);
+
+    
+    //  Add the variable to the symbol table after checking its initializer
+    // This prevents the declaration from referring to itself
+    if (!declare_symbol(
+            &sema->table,
+            name.start,
+            name.length,
+            stmt->defi.declaration_stmt.type)) {
         sema->errors++;
     }
 }

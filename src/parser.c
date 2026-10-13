@@ -46,6 +46,22 @@ static Expr* alloc_expr(Parser* p, ExprKind kind, Token tok) {
     return e;
 }
 
+
+static ExprList* alloc_expr_list(Parser* p, Expr* expr) {
+    ExprList* item = arena_alloc(
+        p->arena,
+        sizeof(ExprList)
+    );
+
+    memset(item, 0, sizeof(ExprList));
+
+    item->expr = expr;
+    item->next = NULL;
+
+    return item;
+}
+
+
 /* ── Token navigation (tokens list holds Token *) ────────── */
 
 static Token token_at(const Parser* p, int index) {
@@ -208,6 +224,38 @@ void parser_init(Parser* p, LinkedList* tokens, Arena* arena) {
     p->arena = arena;
 }
 
+
+static ExprList* parse_call_arguments(Parser* p) {
+    expect(p, TOKEN_LPAREN);
+
+    ExprList* head = NULL;
+    ExprList* tail = NULL;
+
+    if (peek(p).type != TOKEN_RPAREN) {
+        for (;;) {
+            Expr* argument = parse_expr(p, 0);
+            ExprList* item = alloc_expr_list(p, argument);
+
+            if (head == NULL) {
+                head = item;
+            } else {
+                tail->next = item;
+            }
+
+            tail = item;
+
+            if (peek(p).type != TOKEN_COMMA)
+                break;
+
+            advance(p);
+        }
+    }
+
+    expect(p, TOKEN_RPAREN);
+    return head;
+}
+
+
 Expr* parse_expr(Parser* p, int min_bp) {
     Token tok = advance(p);
     Expr* lhs = NULL;
@@ -266,6 +314,29 @@ Expr* parse_expr(Parser* p, int min_bp) {
     }
 
     for (;;) {
+
+        //Function calls bind more tightly than binary operators
+
+        // Will parse expr such as add(1, 2);
+        // add(1, 2) + 3;
+
+        if (peek(p).type == TOKEN_LPAREN) {
+            Token call_token = peek(p);
+            ExprList* args = parse_call_arguments(p);
+
+            Expr* call = alloc_expr(
+                p,
+                EXPR_CALL,
+                call_token
+            );
+
+            call->as.call.callee = lhs;
+            call->as.call.args = args;
+
+            lhs = call;
+            continue;
+        }
+
         Token op = peek(p);
         BP bp = infix_bp(op.type);
 
@@ -284,6 +355,7 @@ Expr* parse_expr(Parser* p, int min_bp) {
 
     return lhs;
 }
+
 TypeExpr* parse_type_expr(Parser* p) {
     Token t = peek(p);
     TypeExpr* type = NULL;

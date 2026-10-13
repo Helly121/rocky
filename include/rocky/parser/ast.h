@@ -61,7 +61,17 @@ typedef enum {
     EXPR_UNARY,
     EXPR_BINARY,
     EXPR_CAST,
+    EXPR_CALL
 } ExprKind;
+
+
+typedef struct ExprList ExprList;
+
+struct ExprList {
+    Expr* expr;
+    ExprList* next;
+};
+
 
 struct Expr {
     ExprKind kind;
@@ -93,6 +103,12 @@ struct Expr {
             TypeKind to;
             Expr* operand;
         } cast;
+
+        struct {
+            Expr* callee;
+            ExprList* args;
+        } call;
+
         struct {
             const char* start;
             int len;

@@ -14,6 +14,7 @@ static void visit_declaration(Sema* sema, Stmt* stmt);
 static SemaType* check_unary_expr(Sema* sema, Expr* expr);
 static SemaType* check_binary_expr(Sema* sema, Expr* expr);
 static SemaTypeKind sema_type_from_ast_kind(TypeKind kind);
+static SemaType* check_call_expr(Sema* sema, Expr* expr);
 
 void init_sema(Sema* sema) {
     init_sym_table(&sema->table);
@@ -162,8 +163,10 @@ static void visit_stmt(Sema* sema, Stmt* stmt) {
             // marks as func from the placeholder
             Symbol* entry = resolve_symbol(&sema->table, stmt->defi.func_stmt.name.start,
                                            stmt->defi.func_stmt.name.length);
-            if (entry != NULL)
+            if (entry != NULL){
                 entry->is_function = true;
+                entry->params = stmt->defi.func_stmt.params;
+            }
         }
 
         begin_scope(&sema->table);
@@ -267,6 +270,149 @@ static void visit_stmt(Sema* sema, Stmt* stmt) {
     }
 }
 
+
+static size_t count_expr_arguments(const ExprList* args) {
+    size_t count = 0;
+
+    while (args != NULL) {
+        count++;
+        args = args->next;
+    }
+
+    return count;
+}
+
+static size_t count_parameters(const Param* params) {
+    size_t count = 0;
+
+    while (params != NULL) {
+        count++;
+        params = params->next;
+    }
+
+    return count;
+}
+
+static SemaType* check_call_expr(Sema* sema, Expr* expr) {
+    Expr* callee = expr->as.call.callee;
+
+    if (callee == NULL ||
+        callee->kind != EXPR_IDENT) {
+        report_expression_error(
+            sema,
+            expr,
+            "call target must be a function identifier"
+        );
+
+        return error_type();
+    }
+
+    Symbol* function = resolve_symbol(
+        &sema->table,
+        callee->as.ident.name,
+        callee->as.ident.len
+    );
+
+    if (function == NULL) {
+        fprintf(
+            stderr,
+            "type error at line %d col %d: "
+            "function '%.*s' is not declared\n",
+            expr->token.line,
+            expr->token.column,
+            callee->as.ident.len,
+            callee->as.ident.name
+        );
+
+        sema->errors++;
+        return error_type();
+    }
+
+    if (!function->is_function) {
+        report_expression_error(
+            sema,
+            expr,
+            "expression is not callable"
+        );
+
+        return error_type();
+    }
+
+    size_t expected_count = count_parameters(function->params);
+    size_t actual_count = count_expr_arguments(expr->as.call.args);
+
+    if (expected_count != actual_count) {
+        fprintf(
+            stderr,
+            "type error at line %d col %d: "
+            "function '%.*s' expects %zu argument(s), got %zu\n",
+            expr->token.line,
+            expr->token.column,
+            callee->as.ident.len,
+            callee->as.ident.name,
+            expected_count,
+            actual_count
+        );
+
+        sema->errors++;
+    }
+
+    ExprList* argument = expr->as.call.args;
+    Param* parameter = function->params;
+
+    while (argument != NULL && parameter != NULL) {
+        SemaType* argument_type = check_expr(
+            sema,
+            argument->expr
+        );
+
+        SemaType* parameter_type = sema_type_from_ast(
+            parameter->type
+        );
+
+        if (argument_type != NULL &&
+            parameter_type != NULL &&
+            argument_type->kind != SEMA_TYPE_ERROR &&
+            parameter_type->kind != SEMA_TYPE_ERROR &&
+            !sema_type_assignable(
+                parameter_type,
+                argument_type
+            )) {
+            fprintf(
+                stderr,
+                "type error at line %d col %d: "
+                "argument type %s is incompatible with "
+                "parameter type %s\n",
+                argument->expr->token.line,
+                argument->expr->token.column,
+                sema_type_name(argument_type),
+                sema_type_name(parameter_type)
+            );
+
+            sema->errors++;
+        }
+
+        sema_type_free(argument_type);
+        sema_type_free(parameter_type);
+
+        argument = argument->next;
+        parameter = parameter->next;
+    }
+
+    // function->type stores the function return TypeExpr.     
+    SemaType* return_type = sema_type_from_ast(
+        function->type
+    );
+
+    if (return_type == NULL)
+        return_type = sema_type_new(SEMA_TYPE_VOID);
+
+    expr->type = ast_type_from_sema_type(return_type);
+    return return_type;
+}
+
+
+
 static SemaType* check_expr(Sema* sema, Expr* expr) {
     if (expr == NULL)
         return sema_type_new(SEMA_TYPE_VOID);
@@ -327,6 +473,10 @@ static SemaType* check_expr(Sema* sema, Expr* expr) {
 
     case EXPR_BINARY:
         result = check_binary_expr(sema, expr);
+        break;
+
+    case EXPR_CALL:
+        result = check_call_expr(sema, expr);
         break;
 
     case EXPR_CAST: {
@@ -440,7 +590,7 @@ static void visit_declaration(Sema* sema, Stmt* stmt) {
         return;
     }
 
-    // Infer and validate the initializer expression type.
+    // Infer and validate the initializer expression type
     SemaType* value_type = check_expr(
         sema,
         stmt->defi.declaration_stmt.expr

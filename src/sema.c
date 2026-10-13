@@ -186,14 +186,73 @@ static void visit_stmt(Sema* sema, Stmt* stmt) {
         break;
 
     case STMT_ASSIGN: {
-        Symbol* entry = resolve_symbol(&sema->table, stmt->defi.assign_stmt.name.start,
-                                       stmt->defi.assign_stmt.name.length);
+        Token name = stmt->defi.assign_stmt.name;
+
+        Symbol* entry = resolve_symbol(
+            &sema->table,
+            name.start,
+            name.length
+        );
+
+        SemaType* target_type = NULL;
+
         if (entry == NULL) {
-            fprintf(stderr, "error: variable '%.*s' is not declared\n",
-                    stmt->defi.assign_stmt.name.length, stmt->defi.assign_stmt.name.start);
+            fprintf(
+                stderr,
+                "type error at line %d col %d: "
+                "variable '%.*s' is not declared\n",
+                stmt->token.line,
+                stmt->token.column,
+                name.length,
+                name.start
+            );
+
+            sema->errors++;
+        } else {
+            target_type = sema_type_from_ast(entry->type);
+
+            if (target_type == NULL ||
+                target_type->kind == SEMA_TYPE_ERROR) {
+                report_statement_error(
+                    sema,
+                    stmt,
+                    "invalid assignment target type"
+                );
+            }
+        }
+
+        
+        // Infer the type of the right-hand side.
+        SemaType* value_type = check_expr(
+            sema,
+            stmt->defi.assign_stmt.value
+        );
+
+        // Validate correct assignments
+        if (target_type != NULL &&
+            target_type->kind != SEMA_TYPE_ERROR &&
+            value_type != NULL &&
+            value_type->kind != SEMA_TYPE_ERROR &&
+            !sema_type_assignable(target_type, value_type)) {
+            fprintf(
+                stderr,
+                "type error at line %d col %d: "
+                "cannot assign value of type %s to variable '%.*s' "
+                "of type %s\n",
+                stmt->token.line,
+                stmt->token.column,
+                sema_type_name(value_type),
+                name.length,
+                name.start,
+                sema_type_name(target_type)
+            );
+
             sema->errors++;
         }
-        visit_expr(sema, stmt->defi.assign_stmt.value);
+
+        sema_type_free(target_type);
+        sema_type_free(value_type);
+
         break;
     }
 

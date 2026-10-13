@@ -15,13 +15,18 @@ static SemaType* check_unary_expr(Sema* sema, Expr* expr);
 static SemaType* check_binary_expr(Sema* sema, Expr* expr);
 static SemaTypeKind sema_type_from_ast_kind(TypeKind kind);
 static SemaType* check_call_expr(Sema* sema, Expr* expr);
+static void check_condition(Sema* sema,Expr* condition,const char* statement_name);
+
 
 void init_sema(Sema* sema) {
     init_sym_table(&sema->table);
     sema->errors = 0;
+    sema->current_return_type = NULL;
 }
 
 void free_sema(Sema* sema) {
+    sema_type_free(sema->current_return_type);
+    sema->current_return_type = NULL;
     free_sym_table(&sema->table);
 }
 
@@ -99,6 +104,46 @@ static void report_statement_error(
 }
 
 
+static void check_condition(
+    Sema* sema,
+    Expr* condition,
+    const char* statement_name
+) {
+    SemaType* condition_type = check_expr(
+        sema,
+        condition
+    );
+
+    if (condition_type == NULL) {
+        fprintf(
+            stderr,
+            "type error: unable to determine %s condition type\n",
+            statement_name
+        );
+
+        sema->errors++;
+        return;
+    }
+    
+    if (condition_type->kind != SEMA_TYPE_ERROR &&
+        condition_type->kind != SEMA_TYPE_BOOL) {
+        fprintf(
+            stderr,
+            "type error at line %d col %d: "
+            "%s condition must have type bool, got %s\n",
+            condition->token.line,
+            condition->token.column,
+            statement_name,
+            sema_type_name(condition_type)
+        );
+
+        sema->errors++;
+    }
+
+    sema_type_free(condition_type);
+}
+
+
 static bool is_boolean_type(const SemaType* type) {
     return type != NULL && type->kind == SEMA_TYPE_BOOL;
 }
@@ -126,24 +171,79 @@ static void visit_stmt(Sema* sema, Stmt* stmt) {
         break;
 
     case STMT_IF:
-        visit_expr(sema, stmt->defi.if_stmt.cond);
+        check_condition(sema, stmt->defi.if_stmt.cond, "if");
         visit_stmt(sema, stmt->defi.if_stmt.body);
         visit_stmt(sema, stmt->defi.if_stmt.else_body);
         break;
 
     case STMT_WHILE:
-        visit_expr(sema, stmt->defi.while_stmt.cond);
+        check_condition(sema, stmt->defi.while_stmt.cond, "while");
         visit_stmt(sema, stmt->defi.while_stmt.body);
         break;
 
-    case STMT_RETURN:
-        visit_expr(sema, stmt->defi.return_stmt.value);
+    case STMT_RETURN: {
+        
+        // return only valid inside a function
+        if (sema->current_return_type == NULL) {
+            report_statement_error(
+                sema,
+                stmt,
+                "return statement is outside of a function"
+            );
+            break;
+        }
+
+        SemaType* value_type = check_expr(
+            sema,
+            stmt->defi.return_stmt.value
+        );
+
+        if (value_type == NULL) {
+            report_statement_error(
+                sema,
+                stmt,
+                "unable to determine return expression type"
+            );
+            break;
+        }
+
+        // parser always requires a return expression
+        // thus returning from a void function is invalid.
+        if (sema->current_return_type->kind == SEMA_TYPE_VOID) {
+            if (value_type->kind != SEMA_TYPE_ERROR) {
+                report_statement_error(
+                    sema,
+                    stmt,
+                    "void function cannot return a value"
+                );
+            }
+        } else if (value_type->kind != SEMA_TYPE_ERROR &&
+                   !sema_type_assignable(
+                       sema->current_return_type,
+                       value_type
+                   )) {
+            fprintf(
+                stderr,
+                "type error at line %d col %d: "
+                "cannot return value of type %s from function "
+                "returning %s\n",
+                stmt->token.line,
+                stmt->token.column,
+                sema_type_name(value_type),
+                sema_type_name(sema->current_return_type)
+            );
+
+            sema->errors++;
+        }
+
+        sema_type_free(value_type);
         break;
+    }
 
     case STMT_FOR:
         begin_scope(&sema->table);
         visit_stmt(sema, stmt->defi.for_stmt.declaration);
-        visit_expr(sema, stmt->defi.for_stmt.cond);
+        check_condition(sema, stmt->defi.for_stmt.cond, "for");
         visit_stmt(sema, stmt->defi.for_stmt.update);
         visit_stmt(sema, stmt->defi.for_stmt.body);
         end_scope(&sema->table);
@@ -169,6 +269,32 @@ static void visit_stmt(Sema* sema, Stmt* stmt) {
             }
         }
 
+         // save the prev function context in case functions become nestable later
+        SemaType* previous_return_type =
+            sema->current_return_type;
+
+        if (stmt->defi.func_stmt.return_type != NULL) {
+            sema->current_return_type = sema_type_from_ast(
+                stmt->defi.func_stmt.return_type
+            );
+        } else {
+            
+            // function without explicit return type is considered void 
+            sema->current_return_type =
+                sema_type_new(SEMA_TYPE_VOID);
+        }
+
+        if (sema->current_return_type == NULL) {
+            sema->current_return_type = error_type();
+
+            report_statement_error(
+                sema,
+                stmt,
+                "invalid function return type"
+            );
+        }
+
+
         begin_scope(&sema->table);
         // walking the params
         Param* param = stmt->defi.func_stmt.params;
@@ -181,6 +307,8 @@ static void visit_stmt(Sema* sema, Stmt* stmt) {
 
         visit_stmt(sema, stmt->defi.func_stmt.body);
         end_scope(&sema->table);
+        sema_type_free(sema->current_return_type);
+        sema->current_return_type = previous_return_type;
         break;
     }
 
